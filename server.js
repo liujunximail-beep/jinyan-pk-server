@@ -54,7 +54,7 @@ const clinics = [
   { id: "aiyashi", clinic: "爱牙仕口腔", fullName: "湖南省邵东市爱牙仕口腔", team: "仕不可挡", password: "123456", city: "湖南邵东", target: 600000, lastSummer: 400000, seats: 9, coach: "待定", status: "active" },
   { id: "sunjunli", clinic: "孙俊莉口腔", fullName: "太原孙俊莉口腔门诊部", team: "必胜队", password: "123456", city: "山西太原", target: 600000, lastSummer: 453310, seats: 8, coach: "待定", status: "active" },
   { id: "erbao", clinic: "二宝口腔", fullName: "内蒙古通辽市扎鲁特旗二宝口腔门诊部", team: "二宝口腔队", password: "123456", city: "内蒙古通辽", target: 1000000, lastSummer: 650000, seats: 12, coach: "待定", status: "active" },
-  { id: "huoshi", clinic: "霍氏口腔", fullName: "霍氏口腔", team: "霍氏王牌队", password: "123456", city: "河南济源", target: 1170000, lastSummer: 900000, seats: 14, coach: "待定", status: "observer" },
+  { id: "huoshi", clinic: "霍氏口腔", fullName: "霍氏口腔", team: "霍氏王牌队", password: "123456", city: "河南济源", target: 1170000, lastSummer: 900000, seats: 14, coach: "待定", status: "active" },
   { id: "jiaxiang", clinic: "嘉祥口腔", fullName: "嘉祥口腔医院", team: "嘉祥口腔队", password: "123456", city: "山东济宁", target: 6110000, lastSummer: 4700000, seats: 26, coach: "待定", status: "active" },
   { id: "haiyang", clinic: "海阳口腔", fullName: "太原海阳口腔", team: "冲锋队", password: "123456", city: "山西太原", target: 250000, lastSummer: 150000, seats: 9, coach: "待定", status: "active" },
   { id: "zhenghe", clinic: "正合口腔", fullName: "正合口腔诊所", team: "正合火焰队", password: "123456", city: "河北张家口", target: 500000, lastSummer: 321010, seats: 11, coach: "不参与暑期陪跑", status: "observer" },

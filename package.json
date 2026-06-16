@@ -1,0 +1,13 @@
+{
+  "name": "jinyan-pk-server",
+  "version": "1.0.0",
+  "description": "瑾言暑期正畸PK看板后端",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "cors": "^2.8.5"
+  }
+}

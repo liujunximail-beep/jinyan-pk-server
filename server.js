@@ -8,46 +8,34 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
 const DATA_DIR = path.join(__dirname, "data");
-const REPORTS_FILE = path.join(DATA_DIR, "reports.json");
-const SCORES_FILE = path.join(DATA_DIR, "scores.json");
-const DATAMODE_FILE = path.join(DATA_DIR, "datamode.json");
-const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
-const PASSWORDS_FILE = path.join(DATA_DIR, "clinic_passwords.json");
-const AUDIT_FILE = path.join(DATA_DIR, "audit.log.json");
 
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+/* ===== 环境检测中间件：支持 ?env=beta 或 X-Env: beta ===== */
+app.use((req, res, next) => {
+  const env = req.query.env || req.headers["x-env"] || "prod";
+  req.dataEnv = env;
+  req.dataDir = env === "beta" ? path.join(DATA_DIR, "beta") : DATA_DIR;
+  if (!fs.existsSync(req.dataDir)) fs.mkdirSync(req.dataDir, { recursive: true });
 
-function readJSON(filepath, fallback) {
-  try {
-    if (fs.existsSync(filepath)) return JSON.parse(fs.readFileSync(filepath, "utf-8"));
-  } catch {}
-  return fallback;
-}
+  // 绑定到当前请求的读写辅助函数
+  req.readJSON = (filename, fallback) => {
+    const fp = path.join(req.dataDir, filename);
+    try { if (fs.existsSync(fp)) return JSON.parse(fs.readFileSync(fp, "utf-8")); }
+    catch (e) {}
+    return fallback;
+  };
+  req.writeJSON = (filename, data) => {
+    fs.writeFileSync(path.join(req.dataDir, filename), JSON.stringify(data, null, 2), "utf-8");
+  };
+  req.appendAuditLog = (action, operator, detail) => {
+    const logs = req.readJSON("audit.log.json", []);
+    logs.push({ ts: new Date().toISOString(), action, operator, detail });
+    if (logs.length > 500) logs.splice(0, logs.length - 500);
+    req.writeJSON("audit.log.json", logs);
+  };
+  next();
+});
 
-function writeJSON(filepath, data) {
-  fs.writeFileSync(filepath, JSON.stringify(data, null, 2), "utf-8");
-}
-
-function appendAuditLog(action, operator, detail) {
-  const logs = readJSON(AUDIT_FILE, []);
-  logs.push({ ts: new Date().toISOString(), action, operator, detail });
-  if (logs.length > 500) logs.splice(0, logs.length - 500);
-  writeJSON(AUDIT_FILE, logs);
-}
-
-function getClinicPassword(clinicId) {
-  const overrides = readJSON(PASSWORDS_FILE, {});
-  return overrides[clinicId] || null;
-}
-
-function validateClinicAuth(team, password) {
-  const clinic = clinics.find(c => c.team === team);
-  if (!clinic) return null;
-  const pwd = getClinicPassword(clinic.id) || clinic.password;
-  if (password !== pwd) return null;
-  return clinic;
-}
-
+/* ===== clinics 配置（全局共享，不区分环境） ===== */
 const clinics = [
   { id: "aiya", clinic: "艾雅口腔", fullName: "绵阳游仙区艾雅口腔", team: "春花正畸先锋队", password: "123456", city: "四川绵阳", target: 2300000, lastSummer: 1290000, seats: 6, coach: "待定", status: "active" },
   { id: "koufang", clinic: "寇芳口腔", fullName: "淄川洪山寇芳口腔诊所", team: "卓越队", password: "123456", city: "山东淄博", target: 30000, lastSummer: 10000, seats: 5, coach: "待定", status: "active" },
@@ -65,6 +53,22 @@ const staffAccounts = [
   { username: "瑾言管理组", password: "123456", role: "admin", name: "瑾言管理组" },
 ];
 
+function getClinicPassword(clinicId) {
+  // 密码文件共享，不区分环境
+  const fp = path.join(DATA_DIR, "clinic_passwords.json");
+  try { if (fs.existsSync(fp)) { const overrides = JSON.parse(fs.readFileSync(fp, "utf-8")); return overrides[clinicId] || null; } }
+  catch (e) {}
+  return null;
+}
+
+function validateClinicAuth(team, password) {
+  const clinic = clinics.find(c => c.team === team);
+  if (!clinic) return null;
+  const pwd = getClinicPassword(clinic.id) || clinic.password;
+  if (password !== pwd) return null;
+  return clinic;
+}
+
 function generateToken() {
   return "tk_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
 }
@@ -72,12 +76,19 @@ function generateToken() {
 function authMiddleware(req, res, next) {
   const token = req.headers["x-auth-token"];
   if (!token) return res.status(401).json({ error: "未登录" });
-  const sessions = readJSON(SESSIONS_FILE, {});
-  const session = sessions[token];
-  if (!session) return res.status(401).json({ error: "登录已过期" });
-  req.session = session;
-  req.token = token;
-  next();
+  // sessions 不区分环境，同一个 token 在两个环境都有效
+  const fp = path.join(DATA_DIR, "sessions.json");
+  try {
+    if (fs.existsSync(fp)) {
+      const sessions = JSON.parse(fs.readFileSync(fp, "utf-8"));
+      const session = sessions[token];
+      if (!session) return res.status(401).json({ error: "登录已过期" });
+      req.session = session;
+      req.token = token;
+      return next();
+    }
+  } catch (e) {}
+  return res.status(401).json({ error: "登录已过期" });
 }
 
 function coachOnly(req, res, next) {
@@ -87,7 +98,7 @@ function coachOnly(req, res, next) {
   next();
 }
 
-/* ===== 登录 ===== */
+/* ===== 登录（sessions 共享，不区分环境） ===== */
 app.post("/api/login", (req, res) => {
   const { username, password, mode } = req.body;
   if (!username || !password) return res.status(400).json({ error: "用户名和密码不能为空" });
@@ -96,34 +107,36 @@ app.post("/api/login", (req, res) => {
     const account = staffAccounts.find(a => a.username === username && a.password === password);
     if (!account) return res.status(401).json({ error: "内部账号或密码不正确" });
     const token = generateToken();
-    const sessions = readJSON(SESSIONS_FILE, {});
+    const fp = path.join(DATA_DIR, "sessions.json");
+    const sessions = (() => { try { return fs.existsSync(fp) ? JSON.parse(fs.readFileSync(fp, "utf-8")) : {}; } catch (e) { return {}; } })();
     sessions[token] = { type: account.role, name: account.name, createdAt: Date.now() };
-    writeJSON(SESSIONS_FILE, sessions);
-    return res.json({ token, session: sessions[token] });
+    fs.writeFileSync(fp, JSON.stringify(sessions, null, 2), "utf-8");
+    return res.json({ token, session: sessions[token], env: req.dataEnv });
   }
 
   const clinic = validateClinicAuth(username, password);
   if (!clinic) return res.status(401).json({ error: "门诊队名或密码不正确" });
   if (clinic.status !== "active") return res.status(403).json({ error: "该门诊暂未参赛" });
   const token = generateToken();
-  const sessions = readJSON(SESSIONS_FILE, {});
+  const fp = path.join(DATA_DIR, "sessions.json");
+  const sessions = (() => { try { return fs.existsSync(fp) ? JSON.parse(fs.readFileSync(fp, "utf-8")) : {}; } catch (e) { return {}; } })();
   sessions[token] = { type: "clinic", clinicId: clinic.id, name: clinic.team, createdAt: Date.now() };
-  writeJSON(SESSIONS_FILE, sessions);
-  return res.json({ token, session: sessions[token], clinic });
+  fs.writeFileSync(fp, JSON.stringify(sessions, null, 2), "utf-8");
+  return res.json({ token, session: sessions[token], clinic, env: req.dataEnv });
 });
 
 /* ===== 获取全量状态 ===== */
 app.get("/api/state", authMiddleware, (req, res) => {
-  const reports = readJSON(REPORTS_FILE, []);
-  const coachScores = readJSON(SCORES_FILE, {});
-  const dataMode = readJSON(DATAMODE_FILE, "official-empty");
+  const reports = req.readJSON("reports.json", []);
+  const coachScores = req.readJSON("scores.json", {});
+  const dataMode = req.readJSON("datamode.json", "official-empty");
 
   let visibleReports = reports;
   if (req.session.type === "clinic") {
     visibleReports = reports.filter(r => r.clinicId === req.session.clinicId);
   }
 
-  res.json({ reports: visibleReports, coachScores, dataMode });
+  res.json({ reports: visibleReports, coachScores, dataMode, env: req.dataEnv });
 });
 
 /* ===== 提交日报 ===== */
@@ -140,62 +153,63 @@ app.post("/api/reports", authMiddleware, (req, res) => {
   report.reviewer = report.reviewer || "";
   report.note = report.note || "门诊提交，待审核";
 
-  const reports = readJSON(REPORTS_FILE, []);
+  const reports = req.readJSON("reports.json", []);
   const idx = reports.findIndex(r => r.clinicId === report.clinicId && r.date === report.date);
   if (idx >= 0) {
     reports[idx] = report;
   } else {
     reports.unshift(report);
   }
-  writeJSON(REPORTS_FILE, reports);
+  req.writeJSON("reports.json", reports);
   res.json({ ok: true, report });
 });
 
 /* ===== 审核通过 ===== */
 app.put("/api/reports/:id/approve", authMiddleware, coachOnly, (req, res) => {
-  const reports = readJSON(REPORTS_FILE, []);
+  const reports = req.readJSON("reports.json", []);
   const report = reports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: "日报不存在" });
   report.status = "approved";
   report.reviewer = req.session.name;
   report.note = report.note || "审核通过";
-  writeJSON(REPORTS_FILE, reports);
+  req.writeJSON("reports.json", reports);
   res.json({ ok: true, report });
 });
 
 /* ===== 审核退回 ===== */
 app.put("/api/reports/:id/reject", authMiddleware, coachOnly, (req, res) => {
-  const reports = readJSON(REPORTS_FILE, []);
+  const reports = req.readJSON("reports.json", []);
   const report = reports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: "日报不存在" });
   report.status = "rejected";
   report.reviewer = req.session.name;
   report.note = "教练组退回：请核对日报数据、凭证和实收金额";
-  writeJSON(REPORTS_FILE, reports);
-  appendAuditLog("reject", req.session.name, { reportId: req.params.id, clinicId: report.clinicId, date: report.date });
+  req.writeJSON("reports.json", reports);
+  req.appendAuditLog("reject", req.session.name, { reportId: req.params.id, clinicId: report.clinicId, date: report.date });
   res.json({ ok: true, report });
 });
 
 /* ===== 删除日报 ===== */
 app.delete("/api/reports/:id", authMiddleware, coachOnly, (req, res) => {
-  let reports = readJSON(REPORTS_FILE, []);
+  let reports = req.readJSON("reports.json", []);
   const report = reports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: "日报不存在" });
   reports = reports.filter(r => r.id !== req.params.id);
-  writeJSON(REPORTS_FILE, reports);
-  appendAuditLog("delete", req.session.name, { reportId: req.params.id, clinicId: report.clinicId, date: report.date });
+  req.writeJSON("reports.json", reports);
+  req.appendAuditLog("delete", req.session.name, { reportId: req.params.id, clinicId: report.clinicId, date: report.date });
   res.json({ ok: true });
 });
 
 /* ===== 保存甘特评分 ===== */
 app.put("/api/scores/gantt", authMiddleware, coachOnly, (req, res) => {
   const scores = req.body;
-  const coachScores = readJSON(SCORES_FILE, {});
+  const coachScores = req.readJSON("scores.json", {});
   Object.assign(coachScores, scores);
-  writeJSON(SCORES_FILE, coachScores);
+  req.writeJSON("scores.json", coachScores);
   res.json({ ok: true, coachScores });
 });
 
+/* ===== 演示数据种子（共享，不区分环境） ===== */
 const seedReports = [
   ["aiya","2026-06-13",13,4,12,11,15,8,28,28,26,3,"早矫/隐形",4,128000,2,1,120000,"approved"],
   ["koufang","2026-06-13",3,1,3,3,4,2,10,6,7,1,"托槽",1,12000,0,0,10000,"pending"],
@@ -225,36 +239,38 @@ const seedReports = [
 
 /* ===== 载入演示数据 ===== */
 app.post("/api/demo/load", authMiddleware, coachOnly, (req, res) => {
-  writeJSON(REPORTS_FILE, seedReports);
-  writeJSON(DATAMODE_FILE, "demo");
-  writeJSON(SCORES_FILE, {
+  req.writeJSON("reports.json", seedReports);
+  req.writeJSON("datamode.json", "demo");
+  req.writeJSON("scores.json", {
     aiya: 24, koufang: 12, aiyashi: 25, sunjunli: 18,
     erbao: 21, huoshi: 27, jiaxiang: 26, haiyang: 17,
   });
-  res.json({ ok: true, dataMode: "demo", coachScores: readJSON(SCORES_FILE, {}) });
+  res.json({ ok: true, dataMode: "demo", coachScores: req.readJSON("scores.json", {}) });
 });
 
 /* ===== 清空数据 ===== */
 app.post("/api/data/clear", authMiddleware, coachOnly, (req, res) => {
-  writeJSON(REPORTS_FILE, []);
-  writeJSON(SCORES_FILE, {});
-  writeJSON(DATAMODE_FILE, "official-empty");
+  req.writeJSON("reports.json", []);
+  req.writeJSON("scores.json", {});
+  req.writeJSON("datamode.json", "official-empty");
   res.json({ ok: true, dataMode: "official-empty" });
 });
 
 /* ===== 健康检查 ===== */
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
+  res.json({ ok: true, time: new Date().toISOString(), env: req.dataEnv });
 });
 
 /* ===== 审计日志 ===== */
 app.get("/api/audit-log", authMiddleware, coachOnly, (req, res) => {
-  res.json(readJSON(AUDIT_FILE, []));
+  res.json(req.readJSON("audit.log.json", []));
 });
 
-/* ===== clinics 配置 ===== */
+/* ===== clinics 列表 ===== */
 app.get("/api/clinics", (req, res) => {
-  const pwdOverrides = readJSON(PASSWORDS_FILE, {});
+  const fp = path.join(DATA_DIR, "clinic_passwords.json");
+  let pwdOverrides = {};
+  try { if (fs.existsSync(fp)) pwdOverrides = JSON.parse(fs.readFileSync(fp, "utf-8")); } catch (e) {}
   const list = clinics.map(c => ({
     id: c.id, clinic: c.clinic, team: c.team, city: c.city, status: c.status,
     hasCustomPassword: !!pwdOverrides[c.id],
@@ -262,20 +278,22 @@ app.get("/api/clinics", (req, res) => {
   res.json(list);
 });
 
-/* ===== 教练组设置门诊密码 ===== */
+/* ===== 教练组设置门诊密码（共享） ===== */
 app.put("/api/clinics/:id/password", authMiddleware, coachOnly, (req, res) => {
   const { password } = req.body;
   if (!password || password.length < 4) return res.status(400).json({ error: "密码至少4位" });
   const clinic = clinics.find(c => c.id === req.params.id);
   if (!clinic) return res.status(404).json({ error: "门诊不存在" });
-  const overrides = readJSON(PASSWORDS_FILE, {});
+  const fp = path.join(DATA_DIR, "clinic_passwords.json");
+  let overrides = {};
+  try { if (fs.existsSync(fp)) overrides = JSON.parse(fs.readFileSync(fp, "utf-8")); } catch (e) {}
   overrides[req.params.id] = String(password);
-  writeJSON(PASSWORDS_FILE, overrides);
-  appendAuditLog("set-password", req.session.name, { clinicId: req.params.id, clinic: clinic.clinic });
+  fs.writeFileSync(fp, JSON.stringify(overrides, null, 2), "utf-8");
+  req.appendAuditLog("set-password", req.session.name, { clinicId: req.params.id, clinic: clinic.clinic });
   res.json({ ok: true, clinicId: req.params.id, hasCustomPassword: true });
 });
 
-/* ===== 门诊自行修改密码 ===== */
+/* ===== 门诊自行修改密码（共享） ===== */
 app.put("/api/my-password", authMiddleware, (req, res) => {
   const { oldPassword, newPassword } = req.body;
   if (!newPassword || newPassword.length < 4) return res.status(400).json({ error: "新密码至少4位" });
@@ -284,10 +302,12 @@ app.put("/api/my-password", authMiddleware, (req, res) => {
     if (!clinic) return res.status(404).json({ error: "门诊不存在" });
     const currentPwd = getClinicPassword(clinic.id) || clinic.password;
     if (oldPassword !== currentPwd) return res.status(401).json({ error: "原密码不正确" });
-    const overrides = readJSON(PASSWORDS_FILE, {});
+    const fp = path.join(DATA_DIR, "clinic_passwords.json");
+    let overrides = {};
+    try { if (fs.existsSync(fp)) overrides = JSON.parse(fs.readFileSync(fp, "utf-8")); } catch (e) {}
     overrides[clinic.id] = newPassword;
-    writeJSON(PASSWORDS_FILE, overrides);
-    appendAuditLog("change-password", req.session.name, { clinicId: clinic.id });
+    fs.writeFileSync(fp, JSON.stringify(overrides, null, 2), "utf-8");
+    req.appendAuditLog("change-password", req.session.name, { clinicId: clinic.id });
     return res.json({ ok: true });
   }
   if (req.session.type === "coach" || req.session.type === "admin") {
@@ -295,7 +315,7 @@ app.put("/api/my-password", authMiddleware, (req, res) => {
     if (!account) return res.status(404).json({ error: "账号不存在" });
     if (oldPassword !== account.password) return res.status(401).json({ error: "原密码不正确" });
     account.password = newPassword;
-    appendAuditLog("change-password", req.session.name, { role: req.session.type });
+    req.appendAuditLog("change-password", req.session.name, { role: req.session.type });
     return res.json({ ok: true });
   }
   res.status(400).json({ error: "不支持的操作" });
@@ -304,8 +324,7 @@ app.put("/api/my-password", authMiddleware, (req, res) => {
 /* ===== 导出Excel ===== */
 app.get("/api/export-excel", authMiddleware, coachOnly, (req, res) => {
   const ExcelJS = require("exceljs");
-
-  const reports = readJSON(REPORTS_FILE, []);
+  const reports = req.readJSON("reports.json", []);
   const activeClinics = clinics.filter(c => c.status === "active");
 
   const wb = new ExcelJS.Workbook();
@@ -345,7 +364,6 @@ app.get("/api/export-excel", authMiddleware, coachOnly, (req, res) => {
       .sort((a, b) => a.date.localeCompare(b.date));
 
     const ws = wb.addWorksheet(clinic.team.length > 31 ? clinic.team.slice(0, 28) + "..." : clinic.team);
-
     ws.mergeCells("A1:R1");
     const titleCell = ws.getCell("A1");
     titleCell.value = `2026年暑期正畸日经营管理表 — ${clinic.team}（${clinic.clinic}）`;
@@ -355,7 +373,6 @@ app.get("/api/export-excel", authMiddleware, coachOnly, (req, res) => {
 
     const totalCash = clinicReports.reduce((s, r) => s + (Number(r.cash) || 0), 0);
     const totalDeals = clinicReports.reduce((s, r) => s + (Number(r.closedDeals) || 0), 0);
-
     ws.getCell("A2").value = `目标：${(clinic.target).toLocaleString()} 元 | 当前累计：${totalCash.toLocaleString()} 元 | 成交量：${totalDeals} 单 | 完成率：${clinic.target > 0 ? (totalCash / clinic.target * 100).toFixed(1) : "0.0"}%`;
     ws.mergeCells("A2:R2");
     ws.getCell("A2").font = { bold: true, size: 11, color: { argb: "FF007AFF" } };
@@ -379,10 +396,7 @@ app.get("/api/export-excel", authMiddleware, coachOnly, (req, res) => {
       columns.forEach((col, ci) => {
         const cell = row.getCell(ci + 1);
         let val = r[col.key];
-        if (col.key === "date") val = val;
-        if (col.key === "cash" || col.key === "tomorrowTarget") {
-          cell.numFmt = "#,##0";
-        }
+        if (col.key === "cash" || col.key === "tomorrowTarget") cell.numFmt = "#,##0";
         cell.value = val !== undefined && val !== null ? val : "";
         cell.border = allBorders;
         cell.alignment = { horizontal: "center", vertical: "middle" };
@@ -445,13 +459,93 @@ app.get("/api/export-excel", authMiddleware, coachOnly, (req, res) => {
     });
   });
 
-  const filename = encodeURIComponent(`瑾言暑期正畸PK数据_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  const suffix = req.dataEnv === "beta" ? "_Beta" : "";
+  const filename = encodeURIComponent(`瑾言暑期正畸PK数据${suffix}_${new Date().toISOString().slice(0, 10)}.xlsx`);
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${filename}`);
   wb.xlsx.write(res).then(() => res.end());
 });
 
+/* ===== Beta → 正式版数据迁移（coach-only） ===== */
+app.post("/api/migrate-beta", authMiddleware, coachOnly, (req, res) => {
+  const betaDir = path.join(DATA_DIR, "beta");
+  const prodDir = DATA_DIR;
+
+  if (!fs.existsSync(betaDir)) {
+    return res.status(404).json({ error: "Beta 环境没有任何数据" });
+  }
+
+  const { mode } = req.body; // "preview" | "execute"
+  const filesToMigrate = ["reports.json", "scores.json", "datamode.json"];
+
+  // 读取 beta 数据
+  const betaData = {};
+  for (const f of filesToMigrate) {
+    const fp = path.join(betaDir, f);
+    try {
+      betaData[f] = fs.existsSync(fp) ? JSON.parse(fs.readFileSync(fp, "utf-8")) : null;
+    } catch (e) {
+      betaData[f] = null;
+    }
+  }
+
+  const betaReports = betaData["reports.json"] || [];
+  const betaScores = betaData["scores.json"] || {};
+
+  const summary = {
+    totalReports: betaReports.length,
+    approvedReports: betaReports.filter(r => r.status === "approved").length,
+    pendingReports: betaReports.filter(r => r.status === "pending").length,
+    rejectedReports: betaReports.filter(r => r.status === "rejected").length,
+    clinicsWithData: [...new Set(betaReports.map(r => r.clinicId))],
+    scoredClinics: Object.keys(betaScores).length,
+  };
+
+  if (mode === "preview") {
+    return res.json({ ok: true, summary, preview: betaReports.slice(0, 5) });
+  }
+
+  // execute: 将 beta 数据迁移到正式环境
+  for (const f of filesToMigrate) {
+    const src = path.join(betaDir, f);
+    const dst = path.join(prodDir, f);
+    if (fs.existsSync(src)) {
+      fs.copyFileSync(src, dst);
+    }
+  }
+
+  // 审计日志
+  req.appendAuditLog("migrate-beta", req.session.name, summary);
+
+  res.json({ ok: true, message: "Beta 数据已成功迁移到正式版", summary });
+});
+
+/* ===== 查看 Beta 数据摘要（coach-only） ===== */
+app.get("/api/beta-summary", authMiddleware, coachOnly, (req, res) => {
+  // 读取 beta 环境的数据
+  const betaDir = path.join(DATA_DIR, "beta");
+  if (!fs.existsSync(betaDir)) {
+    return res.json({ exists: false, totalReports: 0 });
+  }
+
+  const readFile = (filename, fallback) => {
+    const fp = path.join(betaDir, filename);
+    try { return fs.existsSync(fp) ? JSON.parse(fs.readFileSync(fp, "utf-8")) : fallback; }
+    catch (e) { return fallback; }
+  };
+
+  const reports = readFile("reports.json", []);
+  res.json({
+    exists: true,
+    totalReports: reports.length,
+    approvedReports: reports.filter(r => r.status === "approved").length,
+    pendingReports: reports.filter(r => r.status === "pending").length,
+    clinicsWithData: [...new Set(reports.map(r => r.clinicId))],
+    lastUpdated: reports.length > 0 ? reports.reduce((a, b) => a.id > b.id ? a : b).id : null,
+  });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`瑾言PK看板后端运行在端口 ${PORT}`);
+  console.log(`瑾言PK看板后端运行在端口 ${PORT} (支持 ?env=beta)`);
 });

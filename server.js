@@ -164,6 +164,16 @@ app.post("/api/reports", authMiddleware, (req, res) => {
   res.json({ ok: true, report });
 });
 
+/* ===== 读取日报 ===== */
+app.get("/api/reports", authMiddleware, (req, res) => {
+  const reports = req.readJSON("reports.json", []);
+  const { clinicId } = req.query;
+  if (clinicId) {
+    return res.json(reports.filter(r => r.clinicId === clinicId));
+  }
+  res.json(reports);
+});
+
 /* ===== 审核通过 ===== */
 app.put("/api/reports/:id/approve", authMiddleware, coachOnly, (req, res) => {
   const reports = req.readJSON("reports.json", []);

@@ -174,6 +174,40 @@ app.get("/api/reports", authMiddleware, (req, res) => {
   res.json(reports);
 });
 
+/* ===== 批量导入日报（教练组） ===== */
+app.post("/api/reports/batch", authMiddleware, coachOnly, (req, res) => {
+  const { clinicId, reports: incoming } = req.body;
+  if (!clinicId || !Array.isArray(incoming) || !incoming.length) {
+    return res.status(400).json({ error: "缺少 clinicId 或 reports 数组" });
+  }
+  const clinic = clinics.find(c => c.id === clinicId);
+  if (!clinic) return res.status(400).json({ error: "未知门诊ID" });
+
+  const current = req.readJSON("reports.json", []);
+  let imported = 0, skipped = 0;
+  incoming.forEach(item => {
+    if (!item.clinicId || !item.date) { skipped++; return; }
+    const idx = current.findIndex(r => r.clinicId === item.clinicId && r.date === item.date);
+    // 标记为教练组导入
+    item.status = item.status || "pending";
+    item.reviewer = item.reviewer || "";
+    item.note = item.note || req.session.name + " 从本地导入";
+    item.id = item.id || "import-" + Date.now() + "-" + Math.random().toString(36).slice(2,6);
+    if (idx >= 0) {
+      // 不覆盖已审核的数据
+      if (current[idx].status === "approved") { skipped++; return; }
+      current[idx] = item;
+      imported++;
+    } else {
+      current.unshift(item);
+      imported++;
+    }
+  });
+  req.writeJSON("reports.json", current);
+  req.appendAuditLog("batch-import", req.session.name, clinicId + " 导入 " + imported + " 条，跳过 " + skipped);
+  res.json({ ok: true, imported, skipped });
+});
+
 /* ===== 审核通过 ===== */
 app.put("/api/reports/:id/approve", authMiddleware, coachOnly, (req, res) => {
   const reports = req.readJSON("reports.json", []);

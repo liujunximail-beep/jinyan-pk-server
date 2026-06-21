@@ -133,7 +133,11 @@ app.get("/api/state", authMiddleware, (req, res) => {
 
   let visibleReports = reports;
   if (req.session.type === "clinic") {
-    visibleReports = reports.filter(r => r.clinicId === req.session.clinicId);
+    // 门诊端：自己的所有数据 + 其他门诊的已审核数据（用于排名）
+    const myId = req.session.clinicId;
+    visibleReports = reports.filter(r =>
+      r.clinicId === myId || r.status === "approved"
+    );
   }
 
   res.json({ reports: visibleReports, coachScores, dataMode, env: req.dataEnv });

@@ -32,6 +32,20 @@ app.use((req, res, next) => {
     if (logs.length > 500) logs.splice(0, logs.length - 500);
     req.writeJSON("audit.log.json", logs);
   };
+  // 自动备份：每次写 reports.json 前调用，保存当前快照
+  req.backupReports = (label) => {
+    const current = req.readJSON("reports.json", []);
+    if (!current.length) return; // 空数据不备份
+    const backups = req.readJSON("reports.backups.json", []);
+    backups.push({
+      ts: new Date().toISOString(),
+      label: label || "auto",
+      count: current.length,
+      data: current,
+    });
+    if (backups.length > 20) backups.splice(0, backups.length - 20);
+    req.writeJSON("reports.backups.json", backups);
+  };
   next();
 });
 
@@ -164,6 +178,7 @@ app.post("/api/reports", authMiddleware, (req, res) => {
   } else {
     reports.unshift(report);
   }
+  req.backupReports("write-reports");
   req.writeJSON("reports.json", reports);
   res.json({ ok: true, report });
 });
@@ -207,6 +222,7 @@ app.post("/api/reports/batch", authMiddleware, coachOnly, (req, res) => {
       imported++;
     }
   });
+  req.backupReports("batch-import-" + clinicId);
   req.writeJSON("reports.json", current);
   req.appendAuditLog("batch-import", req.session.name, clinicId + " 导入 " + imported + " 条，跳过 " + skipped);
   res.json({ ok: true, imported, skipped });
@@ -220,6 +236,7 @@ app.put("/api/reports/:id/approve", authMiddleware, coachOnly, (req, res) => {
   report.status = "approved";
   report.reviewer = req.session.name;
   report.note = report.note || "审核通过";
+  req.backupReports("write-reports");
   req.writeJSON("reports.json", reports);
   res.json({ ok: true, report });
 });
@@ -232,6 +249,7 @@ app.put("/api/reports/:id/reject", authMiddleware, coachOnly, (req, res) => {
   report.status = "rejected";
   report.reviewer = req.session.name;
   report.note = "教练组退回：请核对日报数据、凭证和实收金额";
+  req.backupReports("reject-" + report.clinicId + "-" + report.date);
   req.writeJSON("reports.json", reports);
   req.appendAuditLog("reject", req.session.name, { reportId: req.params.id, clinicId: report.clinicId, date: report.date });
   res.json({ ok: true, report });
@@ -243,6 +261,7 @@ app.delete("/api/reports/:id", authMiddleware, coachOnly, (req, res) => {
   const report = reports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: "日报不存在" });
   reports = reports.filter(r => r.id !== req.params.id);
+  req.backupReports("delete-" + report.clinicId + "-" + report.date);
   req.writeJSON("reports.json", reports);
   req.appendAuditLog("delete", req.session.name, { reportId: req.params.id, clinicId: report.clinicId, date: report.date });
   res.json({ ok: true });
@@ -296,12 +315,54 @@ app.post("/api/demo/load", authMiddleware, coachOnly, (req, res) => {
   res.json({ ok: true, dataMode: "demo", coachScores: req.readJSON("scores.json", {}) });
 });
 
-/* ===== 清空数据 ===== */
+/* ===== 清空数据（需确认，自动备份） ===== */
 app.post("/api/data/clear", authMiddleware, coachOnly, (req, res) => {
+  if (!req.body.confirm) {
+    return res.status(400).json({ error: "请二次确认：发送 { confirm: true } 以清空所有数据" });
+  }
+  req.backupReports("clear-" + new Date().toISOString().slice(0, 10));
   req.writeJSON("reports.json", []);
   req.writeJSON("scores.json", {});
   req.writeJSON("datamode.json", "official-empty");
-  res.json({ ok: true, dataMode: "official-empty" });
+  req.appendAuditLog("clear-data", req.session.name, { confirmed: true });
+  res.json({ ok: true, dataMode: "official-empty", backedUp: true });
+});
+
+/* ===== 备份下载（教练组） ===== */
+app.get("/api/backup/download", authMiddleware, coachOnly, (req, res) => {
+  const backups = req.readJSON("reports.backups.json", []);
+  const reports = req.readJSON("reports.json", []);
+  const scores = req.readJSON("scores.json", {});
+  const dataMode = req.readJSON("datamode.json", "unknown");
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    dataMode,
+    reports,
+    scores,
+    backupsCount: backups.length,
+  };
+  const filename = "jinyan-pk-backup-" + new Date().toISOString().slice(0, 10) + ".json";
+  res.setHeader("Content-Disposition", "attachment; filename=\"" + filename + "\"");
+  res.json(payload);
+});
+
+/* ===== 备份恢复（教练组） ===== */
+app.post("/api/backup/restore", authMiddleware, coachOnly, (req, res) => {
+  const { reports, scores, dataMode } = req.body;
+  if (!Array.isArray(reports)) return res.status(400).json({ error: "缺少 reports 数组" });
+  // 恢复前先备份当前数据
+  req.backupReports("restore-" + new Date().toISOString().slice(0, 10));
+  req.writeJSON("reports.json", reports);
+  if (scores) req.writeJSON("scores.json", scores);
+  if (dataMode) req.writeJSON("datamode.json", dataMode);
+  req.appendAuditLog("restore-backup", req.session.name, { reportCount: reports.length, dataMode });
+  res.json({ ok: true, reportCount: reports.length, dataMode: dataMode || "unchanged" });
+});
+
+/* ===== 备份列表（教练组，不含数据内容） ===== */
+app.get("/api/backup/list", authMiddleware, coachOnly, (req, res) => {
+  const backups = req.readJSON("reports.backups.json", []);
+  res.json(backups.map(b => ({ ts: b.ts, label: b.label, count: b.count })));
 });
 
 /* ===== 健康检查 ===== */

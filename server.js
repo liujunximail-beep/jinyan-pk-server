@@ -346,6 +346,15 @@ app.get("/api/backup/download", authMiddleware, coachOnly, (req, res) => {
   res.json(payload);
 });
 
+/* ===== 按 ts 获取历史备份内容（教练组） ===== */
+app.get("/api/backup/fetch", authMiddleware, coachOnly, (req, res) => {
+  const { ts } = req.query;
+  const backups = req.readJSON("reports.backups.json", []);
+  const found = backups.find(b => b.ts === ts);
+  if (!found) return res.status(404).json({ error: "备份不存在", ts });
+  res.json({ ts: found.ts, label: found.label, count: found.count, reports: found.data });
+});
+
 /* ===== 备份恢复（教练组） ===== */
 app.post("/api/backup/restore", authMiddleware, coachOnly, (req, res) => {
   const { reports, scores, dataMode } = req.body;

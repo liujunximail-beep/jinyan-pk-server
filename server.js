@@ -328,6 +328,18 @@ app.post("/api/data/clear", authMiddleware, coachOnly, (req, res) => {
   res.json({ ok: true, dataMode: "official-empty", backedUp: true });
 });
 
+/* ===== 客户端数据恢复（前端备份同步到后端） ===== */
+app.post("/api/data/restore", authMiddleware, coachOnly, (req, res) => {
+  const { reports, coachScores, dataMode } = req.body;
+  if (!Array.isArray(reports)) return res.status(400).json({ error: "缺少 reports 数据" });
+  req.backupReports("restore-" + new Date().toISOString().slice(0, 10));
+  req.writeJSON("reports.json", reports);
+  req.writeJSON("scores.json", coachScores || {});
+  req.writeJSON("datamode.json", dataMode || "official-empty");
+  req.appendAuditLog("restore-data", req.session.name, { reportCount: reports.length });
+  res.json({ ok: true, count: reports.length });
+});
+
 /* ===== 备份下载（教练组） ===== */
 app.get("/api/backup/download", authMiddleware, coachOnly, (req, res) => {
   const backups = req.readJSON("reports.backups.json", []);
